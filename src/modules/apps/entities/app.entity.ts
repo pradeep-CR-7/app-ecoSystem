@@ -50,6 +50,9 @@ export class App {
   @Index()
   is_published: boolean;
 
+  @Column({ type: 'timestamp', nullable: true })
+  published_at: Date;
+
   @Column({ default: true })
   @Index()
   is_active: boolean;
