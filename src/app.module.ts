@@ -8,6 +8,9 @@ import { AppsModule } from './modules/apps/apps.module';
 import { DevelopersModule } from './modules/developers/developers.module';
 import { S3Module } from './modules/s3/s3.module';
 import { StoreModule } from './modules/store/store.module';
+import { MerchantsModule } from './modules/merchants/merchants.module';
+import { InstallationsModule } from './modules/installations/installations.module';
+import { CloudFrontModule } from './modules/cloudfront/cloudfront.module';
 
 @Module({
   imports: [
@@ -45,6 +48,9 @@ import { StoreModule } from './modules/store/store.module';
     DevelopersModule,
     S3Module,
     StoreModule,
+    MerchantsModule,
+    InstallationsModule,
+    CloudFrontModule,
   ],
   controllers: [AppController],
   providers: [AppService],
