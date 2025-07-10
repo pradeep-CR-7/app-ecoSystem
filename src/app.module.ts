@@ -1,7 +1,3 @@
-// ===============================================
-// FIXED APP.MODULE.TS - Updated ThrottlerModule Config
-// ===============================================
-
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -11,6 +7,7 @@ import { AppService } from './app.service';
 import { AppsModule } from './modules/apps/apps.module';
 import { DevelopersModule } from './modules/developers/developers.module';
 import { S3Module } from './modules/s3/s3.module';
+import { StoreModule } from './modules/store/store.module';
 
 @Module({
   imports: [
@@ -47,6 +44,7 @@ import { S3Module } from './modules/s3/s3.module';
     AppsModule,
     DevelopersModule,
     S3Module,
+    StoreModule,
   ],
   controllers: [AppController],
   providers: [AppService],
