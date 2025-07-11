@@ -51,7 +51,7 @@ export class AppVersion {
   @Column({ type: 'json', nullable: true })
   supported_platforms: string[];
 
-  @Column({ type: 'enum', enum: UploadStatus, default: UploadStatus.UPLOADING })
+  @Column({ length: 50, default: UploadStatus.UPLOADING })
   @Index()
   upload_status: UploadStatus;
 

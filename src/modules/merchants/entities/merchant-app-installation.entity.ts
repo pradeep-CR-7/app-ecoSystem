@@ -27,7 +27,7 @@ export class MerchantAppInstallation {
   @Column({ length: 50 })
   version_number: string;
 
-  @Column({ type: 'enum', enum: InstallationStatus, default: InstallationStatus.INSTALLING })
+  @Column({ length: 50, default: InstallationStatus.INSTALLING })
   @Index()
   installation_status: InstallationStatus;
 
