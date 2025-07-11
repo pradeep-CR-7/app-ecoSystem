@@ -1,25 +1,23 @@
 import { ApiProperty } from '@nestjs/swagger';
 
-export class InstallAppResponseDto {
+export class UpdateAppResponseDto {
   @ApiProperty({ example: true })
   success: boolean;
 
-  @ApiProperty({ example: 'App installation initiated successfully' })
+  @ApiProperty({ example: 'App update initiated successfully' })
   message: string;
 
   @ApiProperty()
   data: {
     installation_id: number;
-    merchant_id: string;
     app_id: string;
     app_name: string;
-    version_number: string;
+    previous_version: string;
+    new_version: string;
     installation_status: string;
     download_url: string;
     expires_at: string;
-    install_instructions: string;
-    is_reinstall?: boolean;
-    is_latest_version: boolean;
+    update_instructions: string;
   };
 
   @ApiProperty()

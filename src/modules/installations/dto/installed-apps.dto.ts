@@ -27,4 +27,7 @@ export class InstalledAppDto {
 
   @ApiProperty({ example: 'Productivity' })
   category: string;
+
+  @ApiProperty({ example: true, description: 'Indicates if a newer version is available' })
+  isUpdateAvailable: boolean;
 }
