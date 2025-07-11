@@ -6,7 +6,8 @@ export enum InstallationStatus {
   INSTALLING = 'installing',
   INSTALLED = 'installed',
   FAILED = 'failed',
-  UPDATING = 'updating'
+  UPDATING = 'updating',
+  UNINSTALLED = 'uninstalled'
 }
 
 @Entity('merchant_app_installations')
@@ -41,6 +42,9 @@ export class MerchantAppInstallation {
 
   @UpdateDateColumn()
   updated_at: Date;
+
+  @Column({ type: 'timestamp', nullable: true })
+  uninstalled_at: Date;
 
   @ManyToOne(() => Merchant, merchant => merchant.app_installations)
   @JoinColumn({ name: 'merchant_id', referencedColumnName: 'merchant_id' })
