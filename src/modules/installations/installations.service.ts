@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, Not } from 'typeorm';
 import { App } from '../apps/entities/app.entity';
 import { AppVersion, UploadStatus } from '../apps/entities/app-version.entity';
 import { Merchant } from '../merchants/entities/merchant.entity';
@@ -29,161 +29,203 @@ export class InstallationsService {
     private dataSource: DataSource,
   ) {}
 
+  /**
+   * Helper method to compare semantic versions
+   */
+  private compareVersions(version1: string, version2: string): number {
+    const v1Parts = version1.replace(/^v/, '').split('.').map(Number);
+    const v2Parts = version2.replace(/^v/, '').split('.').map(Number);
+    
+    for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
+      const v1Part = v1Parts[i] || 0;
+      const v2Part = v2Parts[i] || 0;
+      
+      if (v1Part > v2Part) return 1;
+      if (v1Part < v2Part) return -1;
+    }
+    
+    return 0;
+  }
+
+  /**
+   * Check if there's an update available for the installed app
+   */
+  private async checkForUpdates(appId: string, currentVersion: string): Promise<boolean> {
+    const latestVersion = await this.appVersionRepository.findOne({
+      where: { 
+        app_id: appId, 
+        is_latest: true, 
+        upload_status: UploadStatus.COMPLETED 
+      }
+    });
+
+    if (!latestVersion) return false;
+
+    // Compare versions - return true if latest is newer than current
+    return this.compareVersions(latestVersion.version_number, currentVersion) > 0;
+  }
+
   async installApp(
-  installAppDto: InstallAppDto,
-  merchant: Merchant,
-): Promise<any> {
-  const { app_id, version_number } = installAppDto;
+    installAppDto: InstallAppDto,
+    merchant: Merchant,
+  ): Promise<any> {
+    const { app_id, version_number } = installAppDto;
 
-  // Check if app exists and is published
-  const app = await this.appRepository.findOne({
-    where: { 
-      app_id, 
-      is_published: true, 
-      is_active: true 
-    },
-    relations: ['developer']
-  });
-
-  if (!app) {
-    throw new NotFoundException('App not found or not available for installation');
-  }
-
-  // Check for ANY existing installation (including uninstalled)
-  const existingInstallation = await this.installationRepository.findOne({
-    where: { 
-      merchant_id: merchant.merchant_id, 
-      app_id
-    }
-  });
-
-  // If there's an active installation, throw conflict
-  if (existingInstallation && existingInstallation.installation_status !== InstallationStatus.UNINSTALLED) {
-    throw new ConflictException('App is already installed. Use update endpoint to change version.');
-  }
-
-  // Get the version to install (specific version or latest)
-  let targetVersion: AppVersion;
-  
-  if (version_number) {
-    targetVersion = await this.appVersionRepository.findOne({
-      where: { app_id, version_number, upload_status: UploadStatus.COMPLETED }
+    // Check if app exists and is published
+    const app = await this.appRepository.findOne({
+      where: { 
+        app_id, 
+        is_published: true, 
+        is_active: true 
+      },
+      relations: ['developer']
     });
-    
-    if (!targetVersion) {
-      throw new NotFoundException(`Version ${version_number} not found for this app`);
+
+    if (!app) {
+      throw new NotFoundException('App not found or not available for installation');
     }
-  } else {
-    targetVersion = await this.appVersionRepository.findOne({
-      where: { app_id, is_latest: true, upload_status: UploadStatus.COMPLETED }
+
+    // Check for ANY existing installation (including uninstalled)
+    const existingInstallation = await this.installationRepository.findOne({
+      where: { 
+        merchant_id: merchant.merchant_id, 
+        app_id
+      }
     });
-    
-    if (!targetVersion) {
+
+    // If there's an active installation, throw conflict
+    if (existingInstallation && existingInstallation.installation_status !== InstallationStatus.UNINSTALLED) {
+      throw new ConflictException('App is already installed. Use update endpoint to change version.');
+    }
+
+    // ALWAYS get the latest version (ignore version_number parameter for now)
+    // You can modify this logic if you want to allow specific version installation
+    const latestVersion = await this.appVersionRepository.findOne({
+      where: { 
+        app_id, 
+        is_latest: true, 
+        upload_status: UploadStatus.COMPLETED 
+      }
+    });
+
+    if (!latestVersion) {
       throw new NotFoundException('No completed versions available for this app');
     }
-  }
 
-  // Generate CloudFront signed URL
-  const signedUrlData = await this.cloudFrontService.generateSignedUrl(
-    targetVersion.s3_file_key,
-    10 // 10 minutes expiration
-  );
+    // Generate CloudFront signed URL for the latest version
+    const signedUrlData = await this.cloudFrontService.generateSignedUrl(
+      latestVersion.s3_file_key,
+      10 // 10 minutes expiration
+    );
 
-  // Start transaction
-  const queryRunner = this.dataSource.createQueryRunner();
-  await queryRunner.connect();
-  await queryRunner.startTransaction();
+    // Start transaction
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
 
-  try {
-    let savedInstallation: MerchantAppInstallation;
+    try {
+      let savedInstallation: MerchantAppInstallation;
 
-    if (existingInstallation && existingInstallation.installation_status === InstallationStatus.UNINSTALLED) {
-      // Reactivate existing uninstalled record
-      const now = new Date();
-      await queryRunner.manager.update(
-        MerchantAppInstallation,
-        { id: existingInstallation.id },
-        {
-          version_number: targetVersion.version_number,
+      if (existingInstallation && existingInstallation.installation_status === InstallationStatus.UNINSTALLED) {
+        // Reactivate existing uninstalled record with latest version
+        const now = new Date();
+        await queryRunner.manager.update(
+          MerchantAppInstallation,
+          { id: existingInstallation.id },
+          {
+            version_number: latestVersion.version_number, // Always use latest
+            installation_status: InstallationStatus.INSTALLING,
+            signed_url_generated_at: signedUrlData.generatedAt,
+            signed_url_expires_at: signedUrlData.expiresAt,
+            installed_at: now,
+            updated_at: now,
+            uninstalled_at: null,
+          }
+        );
+        
+        savedInstallation = await queryRunner.manager.findOne(MerchantAppInstallation, {
+          where: { id: existingInstallation.id }
+        });
+      } else {
+        // Create new installation record with latest version
+        const installation = this.installationRepository.create({
+          merchant_id: merchant.merchant_id,
+          app_id,
+          version_number: latestVersion.version_number, // Always use latest
           installation_status: InstallationStatus.INSTALLING,
           signed_url_generated_at: signedUrlData.generatedAt,
           signed_url_expires_at: signedUrlData.expiresAt,
-          installed_at: now, // Reset install time
-          updated_at: now,
-          uninstalled_at: null, // Clear uninstall timestamp
-        }
-      );
-      
-      // Fetch the updated record
-      savedInstallation = await queryRunner.manager.findOne(MerchantAppInstallation, {
-        where: { id: existingInstallation.id }
-      });
-    } else {
-      // Create new installation record
-      const installation = this.installationRepository.create({
-        merchant_id: merchant.merchant_id,
-        app_id,
-        version_number: targetVersion.version_number,
-        installation_status: InstallationStatus.INSTALLING,
-        signed_url_generated_at: signedUrlData.generatedAt,
-        signed_url_expires_at: signedUrlData.expiresAt,
-      });
+        });
 
-      savedInstallation = await queryRunner.manager.save(installation);
+        savedInstallation = await queryRunner.manager.save(installation);
+      }
+
+      await queryRunner.commitTransaction();
+
+      return {
+        success: true,
+        message: existingInstallation ? 'App reinstallation initiated successfully' : 'App installation initiated successfully',
+        data: {
+          installation_id: savedInstallation.id,
+          merchant_id: merchant.merchant_id,
+          app_id: app.app_id,
+          app_name: app.name,
+          version_number: latestVersion.version_number, // Latest version
+          installation_status: savedInstallation.installation_status,
+          download_url: signedUrlData.signedUrl,
+          expires_at: signedUrlData.expiresAt.toISOString(),
+          install_instructions: `Download the latest version (${latestVersion.version_number}) using the provided URL. URL expires in 10 minutes.`,
+          is_reinstall: !!existingInstallation,
+          is_latest_version: true, // Always true since we always install latest
+        },
+        meta: {
+          request_id: `req_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+        },
+      };
+
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
     }
-
-    await queryRunner.commitTransaction();
-
-    return {
-      success: true,
-      message: existingInstallation ? 'App reinstallation initiated successfully' : 'App installation initiated successfully',
-      data: {
-        installation_id: savedInstallation.id,
-        merchant_id: merchant.merchant_id,
-        app_id: app.app_id,
-        app_name: app.name,
-        version_number: targetVersion.version_number,
-        installation_status: savedInstallation.installation_status,
-        download_url: signedUrlData.signedUrl,
-        expires_at: signedUrlData.expiresAt.toISOString(),
-        install_instructions: `Download the app using the provided URL. URL expires in 10 minutes.`,
-        is_reinstall: !!existingInstallation,
-      },
-      meta: {
-        request_id: `req_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-      },
-    };
-
-  } catch (error) {
-    await queryRunner.rollbackTransaction();
-    throw error;
-  } finally {
-    await queryRunner.release();
   }
-}
 
   async getInstalledApps(merchantId: string): Promise<InstalledAppDto[]> {
     const installations = await this.installationRepository.find({
       where: { 
         merchant_id: merchantId,
-        installation_status: InstallationStatus.INSTALLED // Only return installed apps 
+        installation_status: InstallationStatus.INSTALLED 
       },
       relations: ['app', 'app.developer'],
       order: { installed_at: 'DESC' }
     });
 
-    return installations.map(installation => ({
-      installation_id: installation.id,
-      app_id: installation.app_id,
-      app_name: installation.app?.name || 'Unknown App',
-      version_number: installation.version_number,
-      installation_status: installation.installation_status,
-      installed_at: installation.installed_at.toISOString(),
-      updated_at: installation.updated_at.toISOString(),
-      developer_name: installation.app?.developer?.company_name || installation.app?.developer?.name || 'Unknown Developer',
-      category: installation.app?.category || 'Unknown',
-    }));
+    // Use Promise.all to check updates for all apps concurrently
+    const appsWithUpdateInfo = await Promise.all(
+      installations.map(async (installation) => {
+        const isUpdateAvailable = await this.checkForUpdates(
+          installation.app_id, 
+          installation.version_number
+        );
+
+        return {
+          installation_id: installation.id,
+          app_id: installation.app_id,
+          app_name: installation.app?.name || 'Unknown App',
+          version_number: installation.version_number,
+          installation_status: installation.installation_status,
+          installed_at: installation.installed_at.toISOString(),
+          updated_at: installation.updated_at.toISOString(),
+          developer_name: installation.app?.developer?.company_name || installation.app?.developer?.name || 'Unknown Developer',
+          category: installation.app?.category || 'Unknown',
+          isUpdateAvailable, // New field indicating if update is available
+        };
+      })
+    );
+
+    return appsWithUpdateInfo;
   }
 
   async getInstallationDetails(installationId: number, merchantId: string): Promise<any> {
@@ -196,34 +238,46 @@ export class InstallationsService {
       throw new NotFoundException('Installation not found');
     }
 
-    // Check if signed URL is still valid and generate new one if needed
+    // Check for updates
+    const isUpdateAvailable = await this.checkForUpdates(
+      installation.app_id, 
+      installation.version_number
+    );
+
+    // Get latest version info
+    const latestVersion = await this.appVersionRepository.findOne({
+      where: { 
+        app_id: installation.app_id, 
+        is_latest: true, 
+        upload_status: UploadStatus.COMPLETED 
+      }
+    });
+
+    // Generate fresh signed URL for current installed version
+    const currentAppVersion = await this.appVersionRepository.findOne({
+      where: { app_id: installation.app_id, version_number: installation.version_number }
+    });
+
     let downloadUrl = null;
     let urlExpiresAt = null;
 
-    // if (installation.signed_url_expires_at && installation.signed_url_expires_at > new Date()) {
-      // Existing URL is still valid - regenerate for security
-      const appVersion = await this.appVersionRepository.findOne({
-        where: { app_id: installation.app_id, version_number: installation.version_number }
-      });
+    if (currentAppVersion) {
+      const signedUrlData = await this.cloudFrontService.generateSignedUrl(
+        currentAppVersion.s3_file_key,
+        10
+      );
 
-      if (appVersion) {
-        const signedUrlData = await this.cloudFrontService.generateSignedUrl(
-          appVersion.s3_file_key,
-          10
-        );
+      downloadUrl = signedUrlData.signedUrl;
+      urlExpiresAt = signedUrlData.expiresAt.toISOString();
 
-        downloadUrl = signedUrlData.signedUrl;
-        urlExpiresAt = signedUrlData.expiresAt.toISOString();
-
-        // Update installation with new URL timestamps
-        await this.installationRepository.update(
-          { id: installationId },
-          {
-            signed_url_generated_at: signedUrlData.generatedAt,
-            signed_url_expires_at: signedUrlData.expiresAt,
-          }
-        );
-    //   }
+      // Update installation with new URL timestamps
+      await this.installationRepository.update(
+        { id: installationId },
+        {
+          signed_url_generated_at: signedUrlData.generatedAt,
+          signed_url_expires_at: signedUrlData.expiresAt,
+        }
+      );
     }
 
     return {
@@ -240,6 +294,8 @@ export class InstallationsService {
         url_expires_at: urlExpiresAt,
         installed_at: installation.installed_at.toISOString(),
         updated_at: installation.updated_at.toISOString(),
+        isUpdateAvailable, // Update availability flag
+        latest_version: latestVersion?.version_number || installation.version_number,
         app_details: {
           description: installation.app?.description,
           category: installation.app?.category,
@@ -281,12 +337,11 @@ export class InstallationsService {
   ): Promise<any> {
     const { app_id } = deleteAppDto;
 
-    // Check if app is installed by this merchant
     const installation = await this.installationRepository.findOne({
       where: { 
         merchant_id: merchant.merchant_id, 
         app_id,
-        installation_status: InstallationStatus.INSTALLED // Only allow deletion of installed apps
+        installation_status: InstallationStatus.INSTALLED 
       },
       relations: ['app']
     });
@@ -295,12 +350,10 @@ export class InstallationsService {
       throw new NotFoundException('App is not installed or not found');
     }
 
-    // Check if app is already uninstalled
     if (installation.installation_status === InstallationStatus.UNINSTALLED) {
       throw new ConflictException('App is already uninstalled');
     }
 
-    // Start transaction for soft delete
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
@@ -309,7 +362,6 @@ export class InstallationsService {
       const now = new Date();
       const previousStatus = installation.installation_status;
 
-      // Soft delete: Update status and set uninstalled_at timestamp
       await queryRunner.manager.update(
         MerchantAppInstallation,
         { id: installation.id },
@@ -354,18 +406,109 @@ export class InstallationsService {
       order: { updated_at: 'DESC' }
     });
 
-    return installations.map(installation => ({
-      installation_id: installation.id,
-      app_id: installation.app_id,
-      app_name: installation.app?.name || 'Unknown App',
-      version_number: installation.version_number,
-      installation_status: installation.installation_status,
-      installed_at: installation.installed_at.toISOString(),
-      updated_at: installation.updated_at.toISOString(),
-      uninstalled_at: installation.uninstalled_at?.toISOString() || null,
-      developer_name: installation.app?.developer?.company_name || installation.app?.developer?.name || 'Unknown Developer',
-      category: installation.app?.category || 'Unknown',
-    }));
+    // Check for updates on all apps (including uninstalled ones)
+    const appsWithUpdateInfo = await Promise.all(
+      installations.map(async (installation) => {
+        let isUpdateAvailable = false;
+        
+        // Only check for updates if app is currently installed
+        if (installation.installation_status === InstallationStatus.INSTALLED) {
+          isUpdateAvailable = await this.checkForUpdates(
+            installation.app_id, 
+            installation.version_number
+          );
+        }
+
+        return {
+          installation_id: installation.id,
+          app_id: installation.app_id,
+          app_name: installation.app?.name || 'Unknown App',
+          version_number: installation.version_number,
+          installation_status: installation.installation_status,
+          installed_at: installation.installed_at.toISOString(),
+          updated_at: installation.updated_at.toISOString(),
+          uninstalled_at: installation.uninstalled_at?.toISOString() || null,
+          developer_name: installation.app?.developer?.company_name || installation.app?.developer?.name || 'Unknown Developer',
+          category: installation.app?.category || 'Unknown',
+          isUpdateAvailable, // Update availability flag
+        };
+      })
+    );
+
+    return appsWithUpdateInfo;
   }
 
+  /**
+   * NEW METHOD: Update app to latest version
+   */
+  async updateApp(appId: string, merchantId: string): Promise<any> {
+    const installation = await this.installationRepository.findOne({
+      where: { 
+        merchant_id: merchantId, 
+        app_id: appId,
+        installation_status: InstallationStatus.INSTALLED 
+      },
+      relations: ['app']
+    });
+
+    if (!installation) {
+      throw new NotFoundException('App is not installed');
+    }
+
+    // Get latest version
+    const latestVersion = await this.appVersionRepository.findOne({
+      where: { 
+        app_id: appId, 
+        is_latest: true, 
+        upload_status: UploadStatus.COMPLETED 
+      }
+    });
+
+    if (!latestVersion) {
+      throw new NotFoundException('No latest version available');
+    }
+
+    // Check if already on latest version
+    if (installation.version_number === latestVersion.version_number) {
+      throw new ConflictException('App is already on the latest version');
+    }
+
+    // Generate signed URL for latest version
+    const signedUrlData = await this.cloudFrontService.generateSignedUrl(
+      latestVersion.s3_file_key,
+      10
+    );
+
+    // Update installation record
+    await this.installationRepository.update(
+      { id: installation.id },
+      {
+        version_number: latestVersion.version_number,
+        installation_status: InstallationStatus.UPDATING,
+        signed_url_generated_at: signedUrlData.generatedAt,
+        signed_url_expires_at: signedUrlData.expiresAt,
+        updated_at: new Date(),
+      }
+    );
+
+    return {
+      success: true,
+      message: 'App update initiated successfully',
+      data: {
+        installation_id: installation.id,
+        app_id: appId,
+        app_name: installation.app?.name,
+        previous_version: installation.version_number,
+        new_version: latestVersion.version_number,
+        installation_status: InstallationStatus.UPDATING,
+        download_url: signedUrlData.signedUrl,
+        expires_at: signedUrlData.expiresAt.toISOString(),
+        update_instructions: `Download the updated version (${latestVersion.version_number}) using the provided URL. URL expires in 10 minutes.`,
+      },
+      meta: {
+        request_id: `req_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+      },
+    };
+  }
 }

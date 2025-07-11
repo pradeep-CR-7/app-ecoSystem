@@ -9,6 +9,8 @@ import { InstalledAppDto } from './dto/installed-apps.dto';
 import { CurrentMerchant } from 'src/common/decorators/merchant.decorator';
 import { DeleteAppDto } from './dto/delete-app.dto';
 import { DeleteAppResponseDto } from './dto/delete-app-response.dto';
+import { UpdateAppDto } from './dto/update-app-dto';
+import { UpdateAppResponseDto } from './dto/update-app-response.dto';
 
 @ApiTags('Installations')
 @Controller('api/v1/installations')
@@ -85,6 +87,23 @@ export class InstallationsController {
     @CurrentMerchant() merchant: Merchant,
   ) {
     return this.installationsService.markInstallationComplete(installationId, merchant.merchant_id);
+  }
+
+  //Update app to latest version
+  @Put('update')
+  @UseGuards(MerchantAuthGuard)
+  @ApiOperation({ summary: 'Update an installed app to the latest version' })
+  @ApiBearerAuth()
+  @ApiResponse({ status: 200, description: 'App update initiated successfully', type: UpdateAppResponseDto })
+  @ApiResponse({ status: 400, description: 'Bad request' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 404, description: 'App not installed or not found' })
+  @ApiResponse({ status: 409, description: 'App is already on the latest version' })
+  async updateApp(
+    @Body() updateAppDto: UpdateAppDto,
+    @CurrentMerchant() merchant: Merchant,
+  ): Promise<UpdateAppResponseDto> {
+    return this.installationsService.updateApp(updateAppDto.app_id, merchant.merchant_id);
   }
 
   // Delete/Uninstall App
